@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TheraFlex EMG</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #121212;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: Arial, sans-serif;
+    overflow: hidden;
+  }
+  #topBar {
+    width: 900px;
+    background: #121212;
+    color: white;
+    text-align: center;
+    padding: 6px 0;
+    font-weight: bold;
+    font-size: 14px;
+    letter-spacing: 2px;
+  }
+  #gameCanvas {
+    display: block;
+    border: none;
+    background: #121212;
+  }
+  #bottomBar {
+    width: 900px;
+    height: 90px;
+    background: #1F1B24;
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    position: relative;
+  }
+  #signalSection { display: flex; flex-direction: column; gap: 4px; }
+  #signalLabel { color: white; font-size: 11px; }
+  #signalBar {
+    width: 300px; height: 28px;
+    background: #000;
+    border: 1px solid #333;
+    position: relative;
+    overflow: hidden;
+  }
+  #signalFill {
+    height: 100%;
+    width: 0%;
+    background: #03DAC6;
+    transition: width 0.05s, background 0.1s;
+  }
+  #led {
+    position: absolute;
+    right: 8px; top: 50%;
+    transform: translateY(-50%);
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    border: 1px solid white;
+    background: #333;
+  }
+  #thresholdLabel { color: #888; font-size: 11px; }
+  #repsDisplay {
+    position: absolute;
+    right: 40px;
+    color: #BB86FC;
+    font-size: 28px;
+    font-weight: bold;
+  }
+  #serialControls {
+    position: absolute;
+    left: 360px;
+    top: 12px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  #serialControls button {
+    background: #1F1B24;
+    color: white;
+    border: 1px solid #BB86FC;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 11px;
+    font-weight: bold;
+    cursor: pointer;
+  }
+  #serialControls button:hover { background: #2A2430; }
+  #serialControls button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  #statusLabel {
+    position: absolute;
+    left: 360px;
+    top: 58px;
+    color: #ffff00;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<div id="topBar">TIEMPO: 00:00</div>
+<canvas id="gameCanvas" width="900" height="560"></canvas>
+<div id="bottomBar">
+  <div id="signalSection">
+    <div id="signalLabel">INTENSIDAD (DSP):</div>
+    <div id="signalBar">
+      <div id="signalFill"></div>
+      <div id="led"></div>
+    </div>
+    <div id="thresholdLabel">Umbral: --</div>
+  </div>
+  <div id="serialControls">
+    <button id="connectSerialBtn">🔌 Conectar sensor</button>
+    <button id="demoBtn">▶ Modo demo</button>
+  </div>
+  <div id="statusLabel">Abre la página en Chrome/Edge y conecta el sensor</div>
+  <div id="repsDisplay"></div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+//  CONSTANTES
+// ═══════════════════════════════════════════════════════
+const ANCHO = 900, ALTO = 560;
+const COLOR_FONDO   = '#121212';
+const COLOR_UI      = '#1F1B24';
+const COLOR_ACENTO  = '#BB86FC';
+const COLOR_ERROR   = '#CF6679';
+const COLOR_EXITO   = '#03DAC6';
+
+const ST = { SPLASH:0, MENU:1, INSTRUCCIONES:2, JUGANDO:3, GAMEOVER:4, CALIBRACION:5, DESCANSO:6 };
+
+// ═══════════════════════════════════════════════════════
+//  DSP — Procesamiento de señal (mismo algoritmo que Python)
+// ═══════════════════════════════════════════════════════
+class SignalProcessor {
+  constructor() {
+    this.buf = []; this.maxLen = 30;
+    this.dcOffset = 0; this.alpha = 0.05;
+    this.vPrev = 0; this.vOut = 0;
+  }
+  procesar(raw) {
+    const val = parseFloat(raw);
+    if (isNaN(val)) return 0;
+    this.dcOffset = (1 - this.alpha) * this.dcOffset + this.alpha * val;
+    const ac = val - this.dcOffset;
+    this.vOut = 0.5 * (ac + this.vPrev);
+    this.vPrev = ac;
+    const amp = Math.abs(this.vOut) * 1.5;
+    this.buf.push(amp);
+    if (this.buf.length > this.maxLen) this.buf.shift();
+    return this.buf.reduce((a,b)=>a+b,0)/this.buf.length;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  JUEGO PRINCIPAL
+// ═══════════════════════════════════════════════════════
+class TheraFlex {
+  constructor() {
+    this.canvas = document.getElementById('gameCanvas');
+    this.ctx    = this.canvas.getContext('2d');
+    this.topBar = document.getElementById('topBar');
+    this.signalFill = document.getElementById('signalFill');
+    this.led        = document.getElementById('led');
+    this.threshLbl  = document.getElementById('thresholdLabel');
+    this.statusLbl  = document.getElementById('statusLabel');
+    this.repsDisp   = document.getElementById('repsDisplay');
+
+    this.dsp = new SignalProcessor();
+    this.valorProcesado = 0;
+
+    this.umbral = 10; this.minRuido = 0; this.maxSenal = 50;
+    this.estado = ST.SPLASH;
+    this.modoJuego = 0;
+    this.frameAnim = 0; this.dedobjetivo = 0;
+
+    this.repeticiones = 0;
+    this.inicioSesion = 0;
+    this.finDescanso = 0;
+
+    this.pasoCalib = 0; this.bufCalib = [];
+    this.splashFrame = 0;
+
+    // vars juego
+    this.px = 100; this.py = 300; this.pvel = 0;
+    this.obstaculos = [];
+    this.timerObs = 0; this.cooldownJump = 0;
+    this.gravity = 1.2; this.jumpForce = -22; this.sueloY = ALTO - 160;
+    this.liftForce = -1.2;
+    this.nivelCarga = 0;
+
+    this.configurarSerial();
+    this.mostrarSplash();
+    requestAnimationFrame(() => this.loop());
+  }
+
+  // ─── SENSOR SERIAL EN LA WEB ───────────────────────────
+  configurarSerial() {
+    this.serialPort = null;
+    this.serialReader = null;
+    this.serialBuffer = '';
+    this.demoInterval = null;
+
+    this.connectBtn = document.getElementById('connectSerialBtn');
+    this.demoBtn = document.getElementById('demoBtn');
+
+    if (!('serial' in navigator)) {
+      this.statusLbl.style.color = COLOR_ERROR;
+      this.statusLbl.textContent = 'Web Serial no está disponible. Usa Chrome o Edge en computador.';
+      if (this.connectBtn) this.connectBtn.disabled = true;
+    } else {
+      this.statusLbl.style.color = '#ffff00';
+      this.statusLbl.textContent = 'Listo para conectar sensor por USB';
+      this.connectBtn?.addEventListener('click', () => this.conectarSerial());
+    }
+
+    this.demoBtn?.addEventListener('click', () => this.iniciarDemo());
+  }
+
+  async conectarSerial() {
+    if (!('serial' in navigator)) return;
+
+    try {
+      this.detenerDemo();
+      this.statusLbl.style.color = '#ffff00';
+      this.statusLbl.textContent = 'Selecciona el puerto del Arduino/sensor...';
+
+      this.serialPort = await navigator.serial.requestPort();
+      await this.serialPort.open({ baudRate: 9600 }); // Debe coincidir con Serial.begin(9600)
+
+      this.statusLbl.style.color = COLOR_EXITO;
+      this.statusLbl.textContent = 'SENSOR CONECTADO ✓';
+      if (this.connectBtn) this.connectBtn.textContent = 'Sensor conectado';
+
+      await this.leerSerial();
+    } catch (err) {
+      this.statusLbl.style.color = COLOR_ERROR;
+      this.statusLbl.textContent = 'No se pudo conectar: ' + (err?.message || err);
+      if (this.connectBtn) this.connectBtn.textContent = '🔌 Conectar sensor';
+    }
+  }
+
+  async leerSerial() {
+    const decoder = new TextDecoderStream();
+    const inputDone = this.serialPort.readable.pipeTo(decoder.writable);
+    const inputStream = decoder.readable;
+    this.serialReader = inputStream.getReader();
+
+    try {
+      while (true) {
+        const { value, done } = await this.serialReader.read();
+        if (done) break;
+        if (value) this.procesarTextoSerial(value);
+      }
+    } catch (err) {
+      this.statusLbl.style.color = COLOR_ERROR;
+      this.statusLbl.textContent = 'Sensor desconectado o lectura interrumpida';
+    } finally {
+      this.serialReader.releaseLock();
+      await inputDone.catch(() => {});
+    }
+  }
+
+  procesarTextoSerial(texto) {
+    this.serialBuffer += texto;
+    const lineas = this.serialBuffer.split(/?
+/);
+    this.serialBuffer = lineas.pop() || '';
+
+    for (const linea of lineas) {
+      const match = linea.trim().match(/-?\d+(\.\d+)?/);
+      if (!match) continue;
+      this.valorProcesado = this.dsp.procesar(parseFloat(match[0]));
+      this.statusLbl.style.color = COLOR_EXITO;
+      this.statusLbl.textContent = 'SENSOR CONECTADO ✓';
+    }
+  }
+
+  iniciarDemo() {
+    this.detenerDemo();
+    let t = 0;
+    this.statusLbl.style.color = '#ffff00';
+    this.statusLbl.textContent = 'MODO DEMO activo — datos simulados';
+
+    this.demoInterval = setInterval(() => {
+      t += 0.12;
+      let raw = 512 + 45 * Math.sin(t) + (Math.random() * 30 - 15);
+      if (Math.random() < 0.08) raw += 260 + Math.random() * 120; // pico tipo contracción
+      this.valorProcesado = this.dsp.procesar(raw);
+    }, 20);
+  }
+
+  detenerDemo() {
+    if (this.demoInterval) {
+      clearInterval(this.demoInterval);
+      this.demoInterval = null;
+    }
+  }
+
+  // ─── SPLASH ────────────────────────────────────────────
+  mostrarSplash() {
+    this.estado = ST.SPLASH;
+    this.splashFrame = 0;
+  }
+
+  dibujarSplash() {
+    const c = this.ctx; c.clearRect(0,0,ANCHO,ALTO);
+    c.fillStyle = COLOR_FONDO; c.fillRect(0,0,ANCHO,ALTO);
+    const f = this.splashFrame;
+    const colores = ['#121212','#1a1a1a','#2a2a2a','#444','#666','#888','#BB86FC','white'];
+    const idx = Math.min(Math.floor(f/8), colores.length-1);
+    const sz = 45 + Math.min(Math.floor(f/4), 15);
+    c.fillStyle = colores[idx];
+    c.font = `bold ${sz}px Helvetica`;
+    c.textAlign = 'center';
+    c.fillText('T H E R A F L E X', ANCHO/2, ALTO/2 - 20);
+    if (f > 30) {
+      const prog = Math.min((f-30)*12, 500);
+      c.strokeStyle = COLOR_EXITO; c.lineWidth = 4;
+      c.lineCap = 'round';
+      c.beginPath();
+      c.moveTo(ANCHO/2 - prog/2, ALTO/2 + 40);
+      c.lineTo(ANCHO/2 + prog/2, ALTO/2 + 40);
+      c.stroke();
+    }
+    this.splashFrame++;
+    if (this.splashFrame > 120) this.estado = ST.MENU;
+  }
+
+  // ─── MENÚ ──────────────────────────────────────────────
+  dibujarMenu() {
+    const c = this.ctx; c.clearRect(0,0,ANCHO,ALTO);
+    c.fillStyle = COLOR_FONDO; c.fillRect(0,0,ANCHO,ALTO);
+
+    this.texto('THERAFLEX', ANCHO/2, 50, 'white', 'bold 38px Helvetica');
+
+    this.botonMenu(ANCHO/2, 120, '⚙️  CALIBRAR SENSOR', '#FF9800', '', () => this.iniciarCalibracion());
+    this.botonMenu(ANCHO/2, 230, '1. COORDINACIÓN MOTRIZ',
+      '#BB86FC', 'Contracción rápida para saltar obstáculos.', () => this.iniciarInstrucciones(1), true);
+    this.botonMenu(ANCHO/2, 345, '2. APERTURA SOSTENIDA',
+      '#03DAC6', 'Abrir y cerrar mano — mantener contracción media.', () => this.iniciarInstrucciones(2), true);
+    this.botonMenu(ANCHO/2, 460, '3. FUERZA ISOMÉTRICA',
+      '#CF6679', 'Tensión muscular al máximo — llenar barra de energía.', () => this.iniciarInstrucciones(3), true);
+
+    this.texto(`Calibración → Reposo: ${this.minRuido.toFixed(1)} | Máx: ${this.maxSenal.toFixed(1)} | Umbral: ${this.umbral.toFixed(1)}`,
+      ANCHO/2, 530, '#555', '9px Arial');
+  }
+
+  botonMenu(x, y, titulo, color, sub, cb, grande=false) {
+    const h = grande ? 45 : 25, w = grande ? 280 : 150;
+    const c = this.ctx;
+    c.fillStyle = COLOR_UI;
+    c.strokeStyle = color; c.lineWidth = 2;
+    c.beginPath(); c.roundRect(x-w, y-h, w*2, h*2, 6); c.fill(); c.stroke();
+    this.texto(titulo, x, y - (grande ? 12 : 0), color, `bold ${grande?16:14}px Arial`);
+    if (sub) this.texto(sub, x, y+18, '#888', '10px Arial');
+    this.registrarClick(x-w, y-h, w*2, h*2, cb);
+  }
+
+  // ─── CALIBRACIÓN ───────────────────────────────────────
+  iniciarCalibracion() { this.estado = ST.CALIBRACION; this.pasoCalib = 0; }
+
+  dibujarCalibracion() {
+    const c = this.ctx; c.clearRect(0,0,ANCHO,ALTO);
+    c.fillStyle = COLOR_FONDO; c.fillRect(0,0,ANCHO,ALTO);
+    const p = this.pasoCalib;
+
+    if (p === 0) {
+      this.texto('ASISTENTE DE CALIBRACIÓN', ANCHO/2, 120, '#FF9800', 'bold 28px Helvetica');
+      this.texto('Ajustaremos el sistema a tu capacidad muscular de hoy.', ANCHO/2, 200, 'white', '14px Arial');
+      this.texto('1. Siéntate cómodo.', ANCHO/2, 255, '#aaa', '12px Arial');
+      this.texto('2. Conecta los electrodos correctamente.', ANCHO/2, 278, '#aaa', '12px Arial');
+      this.texto('3. Prepárate para seguir las instrucciones.', ANCHO/2, 301, '#aaa', '12px Arial');
+      this.botonGen(ANCHO/2, 380, 'EMPEZAR', '#03DAC6', () => { this.pasoCalib=1; this.bufCalib=[]; this.calibTimerStart = performance.now(); });
+    }
+    else if (p === 1) {
+      this.texto('FASE 1: RELAJACIÓN', ANCHO/2, 180, '#03DAC6', 'bold 24px Helvetica');
+      this.texto('Deja el músculo COMPLETAMENTE RELAJADO...', ANCHO/2, 260, 'white', '16px Arial');
+      this.texto('Midiendo ruido basal...', ANCHO/2, 310, '#888', '12px Arial');
+      this.bufCalib.push(this.valorProcesado);
+      this.dibujarBarraCalib(performance.now() - (this.calibTimerStart||performance.now()), 3000);
+      if ((performance.now()-(this.calibTimerStart||0)) >= 3000) { this.pasoCalib=2; this.calibTimerStart=null; }
+    }
+    else if (p === 2) {
+      this.minRuido = Math.max(...this.bufCalib, 0);
+      this.texto('FASE 2: CONTRACCIÓN MÁXIMA', ANCHO/2, 180, '#CF6679', 'bold 24px Helvetica');
+      this.texto('¡CONTRAE EL MÚSCULO AHORA!', ANCHO/2, 260, 'white', 'bold 20px Arial');
+      this.texto('Mantén la fuerza hasta que termine la barra...', ANCHO/2, 310, 'white', '14px Arial');
+      this.bufCalib=[];
+      this.bufCalib.push(this.valorProcesado);
+      if (!this.calibTimerStart) this.calibTimerStart = performance.now();
+      this.dibujarBarraCalib(performance.now()-this.calibTimerStart, 3000);
+      if ((performance.now()-this.calibTimerStart) >= 3000) { this.pasoCalib=3; this.calibTimerStart=null; }
+    }
+    else if (p === 3) {
+      this.maxSenal = Math.max(...this.bufCalib, 10);
+      const diff = this.maxSenal - this.minRuido;
+      if (diff < 2) {
+        this.texto('⚠️ ERROR DE SEÑAL', ANCHO/2, 150, COLOR_ERROR, 'bold 24px Helvetica');
+        this.texto('No se detectó diferencia entre relajación y tensión.', ANCHO/2, 230, 'white', '14px Arial');
+        this.texto('Revisa el contacto de los electrodos.', ANCHO/2, 260, 'white', '13px Arial');
+        this.botonGen(ANCHO/2, 350, 'REINTENTAR', 'white', () => this.iniciarCalibracion());
+      } else {
+        this.umbral = this.minRuido + diff * 0.25;
+        const calidad = diff > 40 ? 'EXCELENTE' : diff > 15 ? 'BUENA' : 'POBRE';
+        const ccolor  = diff > 15 ? COLOR_EXITO : 'yellow';
+        this.texto('¡CALIBRACIÓN EXITOSA!', ANCHO/2, 100, COLOR_EXITO, 'bold 24px Helvetica');
+        this.texto(`Calidad de señal: ${calidad}`, ANCHO/2, 170, ccolor, 'bold 14px Arial');
+        this.texto(`Ruido base: ${this.minRuido.toFixed(1)}`, ANCHO/2, 220, '#888', '14px Arial');
+        this.texto(`Fuerza máxima: ${this.maxSenal.toFixed(1)}`, ANCHO/2, 250, '#888', '14px Arial');
+        this.texto(`UMBRAL: ${this.umbral.toFixed(1)}`, ANCHO/2, 310, 'white', 'bold 20px Arial');
+        this.botonGen(ANCHO/2, 420, 'VOLVER AL MENÚ', 'white', () => this.estado = ST.MENU);
+        this.threshLbl.textContent = `Umbral: ${this.umbral.toFixed(1)}`;
+      }
+    }
+  }
+
+  dibujarBarraCalib(elapsed, duracion) {
+    const prog = Math.min(elapsed/duracion, 1) * 400;
+    const c = this.ctx;
+    c.strokeStyle='#555'; c.lineWidth=1;
+    c.strokeRect(ANCHO/2-200, 370, 400, 20);
+    c.fillStyle='white';
+    c.fillRect(ANCHO/2-200, 370, prog, 20);
+  }
+
+  // ─── INSTRUCCIONES ─────────────────────────────────────
+  iniciarInstrucciones(modo) {
+    this.estado = ST.INSTRUCCIONES;
+    this.modoJuego = modo;
+    this.frameAnim = 0; this.dedobjetivo = 0;
+  }
+
+  dibujarInstrucciones() {
+    const c = this.ctx; c.clearRect(0,0,ANCHO,ALTO);
+    c.fillStyle = COLOR_FONDO; c.fillRect(0,0,ANCHO,ALTO);
+    const m = this.modoJuego;
+    const info = [
+      null,
+      {t:'EJERCICIO 1: COORDINACIÓN', s:'Contracción rápida para saltar obstáculos.\nFomenta reflejos rápidos.', col:'#BB86FC'},
+      {t:'EJERCICIO 2: APERTURA',     s:'Mantén contracción para subir, relaja para bajar.\nFomenta control sostenido.', col:'#03DAC6'},
+      {t:'EJERCICIO 3: FUERZA',       s:'Contrae al máximo para llenar la barra.\nCompleta series al 100%.', col:'#CF6679'},
+    ][m];
+    this.texto(info.t, ANCHO/2, 60, info.col, 'bold 26px Helvetica');
+    info.s.split('\n').forEach((l,i) => this.texto(l, ANCHO/2, 110+i*26, 'white', '16px Arial'));
+    c.strokeStyle='#555'; c.lineWidth=1;
+    c.strokeRect(ANCHO/2-200, 170, 400, 220);
+    this.animarInstrucciones(info.col);
+    this.botonGen(ANCHO/2, 460, 'COMENZAR TERAPIA', info.col, () => this.iniciarPartida());
+  }
+
+  animarInstrucciones(color) {
+    const c = this.ctx;
+    const cx = ANCHO/2, cy = 280;
+    const m = this.modoJuego;
+    this.frameAnim = (this.frameAnim+1);
+
+    if (m === 1) {
+      const ciclo = 60, f = this.frameAnim % ciclo;
+      const t = f < ciclo/2 ? f/(ciclo/2) : 2 - f/(ciclo/2);
+      if (f === 0) this.dedobjetivo = (this.dedobjetivo+1)%4;
+      const bx=[-25,0,25,45], by=[cy-35,cy-40,cy-35,cy-15];
+      const px=[-30,0,30,55], py=[cy-100,cy-110,cy-100,cy-70];
+      // Palma
+      c.beginPath();
+      c.moveTo(cx-45,cy+30); c.lineTo(cx-40,cy-30); c.lineTo(cx,cy-45);
+      c.lineTo(cx+45,cy-20); c.lineTo(cx+50,cy+30); c.lineTo(cx+15,cy+70);
+      c.lineTo(cx-25,cy+60); c.closePath();
+      c.fillStyle='#1A1A1A'; c.fill();
+      c.strokeStyle=color; c.lineWidth=3; c.stroke();
+      // Dedos
+      for (let i=0; i<4; i++) {
+        let tx,ty,dc;
+        if (i===this.dedobjetivo) {
+          tx=cx+px[i]+(cx-20-(cx+px[i]))*t;
+          ty=py[i]+(cy-40-py[i])*t; dc=color;
+        } else { tx=cx+px[i]; ty=py[i]; dc='#555'; }
+        this.dedo(cx+bx[i], by[i], tx, ty, 16, dc);
+      }
+      this.texto(['ÍNDICE','MEDIO','ANULAR','MEÑIQUE'][this.dedobjetivo], cx, cy+120, 'white', 'bold 12px Arial');
+    }
+    else if (m === 2) {
+      const f = this.frameAnim%80;
+      const t = f<40 ? f/40 : 2-f/40;
+      const bx=[-25,0,25,45], by=[cy-35,cy-40,cy-35,cy-15];
+      const px=[-30,0,30,55], py=[cy-100,cy-110,cy-100,cy-70];
+      c.beginPath();
+      c.moveTo(cx-45,cy+30); c.lineTo(cx-40,cy-30); c.lineTo(cx,cy-45);
+      c.lineTo(cx+45,cy-20); c.lineTo(cx+50,cy+30); c.lineTo(cx+15,cy+70);
+      c.lineTo(cx-25,cy+60); c.closePath();
+      c.fillStyle='#1A1A1A'; c.fill(); c.strokeStyle=color; c.lineWidth=3; c.stroke();
+      for (let i=0; i<4; i++) {
+        const tx=cx+px[i]+(cx+bx[i]*0.5-(cx+px[i]))*t;
+        const ty=py[i]+(cy+10-py[i])*t;
+        this.dedo(cx+bx[i], by[i], tx, ty, 16, color);
+      }
+      this.texto(t>0.5 ? 'CERRAR (PUÑO)' : 'ABRIR (MANO)', cx, cy+120,
+                 t>0.5 ? '#00FF00' : 'white', 'bold 14px Arial');
+    }
+    else if (m === 3) {
+      const f = this.frameAnim%60, tenso = f>30;
+      const ox=tenso ? (Math.random()*6-3)|0 : 0, oy=tenso ? (Math.random()*6-3)|0 : 0;
+      const hom=[cx-100,cy+80], cod=[cx-30+ox,cy+60+oy], mun=[cx+50+ox,cy-20+oy];
+      if (tenso) {
+        c.strokeStyle='#4A1920'; c.lineWidth=50; c.lineCap='round';
+        c.beginPath(); c.moveTo(hom[0],hom[1]); c.lineTo(cod[0],cod[1]); c.lineTo(mun[0],mun[1]); c.stroke();
+      }
+      c.strokeStyle=color; c.lineWidth=38; c.lineCap='round';
+      c.beginPath(); c.moveTo(hom[0],hom[1]); c.lineTo(cod[0],cod[1]); c.lineTo(mun[0],mun[1]); c.stroke();
+      c.strokeStyle='#1A1A1A'; c.lineWidth=32;
+      c.beginPath(); c.moveTo(hom[0],hom[1]); c.lineTo(cod[0],cod[1]); c.lineTo(mun[0],mun[1]); c.stroke();
+      this.texto(tenso?'¡MANTÉN TENSIÓN!':'Relaja...', cx, cy+140, tenso?color:'#888', tenso?'bold 16px Arial':'14px Arial');
+    }
+  }
+
+  dedo(bx,by,tx,ty,g,col) {
+    const c=this.ctx;
+    c.strokeStyle=col; c.lineWidth=g; c.lineCap='round';
+    c.beginPath(); c.moveTo(bx,by); c.lineTo(tx,ty); c.stroke();
+    c.strokeStyle='#1A1A1A'; c.lineWidth=g-4;
+    c.beginPath(); c.moveTo(bx,by); c.lineTo(tx,ty); c.stroke();
+  }
+
+  // ─── PARTIDA ───────────────────────────────────────────
+  iniciarPartida() {
+    this.estado = ST.JUGANDO;
+    this.repeticiones = 0;
+    this.repsDisp.textContent = 'REPETICIONES: 0';
+    this.inicioSesion = performance.now();
+    this.px = 100; this.py = 300; this.pvel = 0;
+    this.obstaculos = [];
+    this.timerObs = performance.now();
+    this.cooldownJump = 0;
+    if (this.modoJuego===1) { this.py=this.sueloY; this.gravity=1.2; this.jumpForce=-22; }
+    if (this.modoJuego===2) { this.gravity=0.6; this.liftForce=-1.2; }
+    if (this.modoJuego===3) { this.nivelCarga=0; }
+  }
+
+  registrarRep() {
+    this.repeticiones++;
+    this.repsDisp.textContent = `REPETICIONES: ${this.repeticiones}`;
+    if (this.repeticiones%10===0) {
+      this.estado = ST.DESCANSO;
+      this.finDescanso = performance.now()+30000;
+    }
+  }
+
+  gameOver() {
+    this.estado = ST.GAMEOVER;
+  }
+
+  dibujarGameOver() {
+    const c = this.ctx; c.clearRect(0,0,ANCHO,ALTO);
+    c.fillStyle=COLOR_FONDO; c.fillRect(0,0,ANCHO,ALTO);
+    this.texto('FIN DE LA SESIÓN', ANCHO/2, ALTO/2-100, COLOR_ERROR, 'bold 40px Helvetica');
+    this.texto(`Lograste ${this.repeticiones} repeticiones.`, ANCHO/2, ALTO/2-30, 'white', '20px Arial');
+    this.botonGen(ANCHO/2, ALTO/2+50, 'REINICIAR EJERCICIO', 'white', ()=>this.iniciarInstrucciones(this.modoJuego));
+    this.botonGen(ANCHO/2, ALTO/2+130, 'MENÚ PRINCIPAL', COLOR_ACENTO, ()=>{ this.estado=ST.MENU; });
+  }
+
+  // ─── GAMEPLAY LOOP ─────────────────────────────────────
+  dibujarJuego(now) {
+    const c=this.ctx; c.clearRect(0,0,ANCHO,ALTO);
+    c.fillStyle=COLOR_FONDO; c.fillRect(0,0,ANCHO,ALTO);
+    const activo = this.valorProcesado > this.umbral;
+
+    if (this.modoJuego===1) {
+      // Gravedad y salto
+      if (activo && this.py>=this.sueloY && (now-this.cooldownJump)>300) {
+        this.pvel=this.jumpForce; this.cooldownJump=now;
+      }
+      this.pvel+=this.gravity; this.py+=this.pvel;
+      if (this.py>this.sueloY) { this.py=this.sueloY; this.pvel=0; }
+      // Suelo
+      c.strokeStyle='white'; c.lineWidth=3;
+      c.beginPath(); c.moveTo(0,this.sueloY); c.lineTo(ANCHO,this.sueloY); c.stroke();
+      // Player
+      c.fillStyle='#BB86FC'; c.strokeStyle='white'; c.lineWidth=2;
+      c.beginPath(); c.ellipse(this.px+20,this.py-20,20,20,0,0,Math.PI*2); c.fill(); c.stroke();
+      // Obstáculos
+      if (now>this.timerObs) {
+        this.obstaculos.push({x:ANCHO, passed:false});
+        this.timerObs=now+1500+Math.random()*1000;
+      }
+      this.obstaculos.forEach(o=>{
+        o.x-=9;
+        c.fillStyle='#CF6679'; c.strokeStyle='red'; c.lineWidth=1;
+        c.beginPath(); c.moveTo(o.x,this.sueloY); c.lineTo(o.x+20,this.sueloY-40); c.lineTo(o.x+40,this.sueloY); c.closePath(); c.fill(); c.stroke();
+        // Colisión
+        if (this.px+30>o.x && this.px+10<o.x+40 && this.py>this.sueloY-35) this.gameOver();
+        if (o.x<this.px && !o.passed) { this.registrarRep(); o.passed=true; }
+      });
+      this.obstaculos=this.obstaculos.filter(o=>o.x>-50);
+    }
+
+    else if (this.modoJuego===2) {
+      this.pvel += activo ? this.liftForce : this.gravity;
+      this.pvel = Math.max(-8, Math.min(8, this.pvel));
+      this.py += this.pvel;
+      if (this.py<0) { this.py=0; this.pvel=0; }
+      if (this.py>ALTO-80) { this.gameOver(); return; }
+      // Jugador
+      c.fillStyle='#03DAC6'; c.strokeStyle='white'; c.lineWidth=2;
+      c.beginPath(); c.ellipse(this.px+20,this.py+20,20,20,0,0,Math.PI*2); c.fill(); c.stroke();
+      // Obstáculos flappy
+      if (now>this.timerObs) {
+        const gy=80+Math.random()*(ALTO-280);
+        this.obstaculos.push({x:ANCHO, gy, gh:180, passed:false});
+        this.timerObs=now+2500;
+      }
+      this.obstaculos.forEach(o=>{
+        o.x-=6;
+        c.fillStyle='#333'; c.strokeStyle='gray'; c.lineWidth=1;
+        c.fillRect(o.x,0,50,o.gy); c.strokeRect(o.x,0,50,o.gy);
+        c.fillRect(o.x,o.gy+180,50,ALTO-o.gy-180); c.strokeRect(o.x,o.gy+180,50,ALTO-o.gy-180);
+        if (this.px+35>o.x && this.px+5<o.x+50)
+          if (this.py+5<o.gy || this.py+35>o.gy+180) this.gameOver();
+        if (o.x<this.px && !o.passed) { this.registrarRep(); o.passed=true; }
+      });
+      this.obstaculos=this.obstaculos.filter(o=>o.x>-60);
+    }
+
+    else if (this.modoJuego===3) {
+      this.nivelCarga += activo ? 0.8 : -0.3;
+      this.nivelCarga = Math.max(0,Math.min(100,this.nivelCarga));
+      const cx=ANCHO/2, cy=ALTO/2-40;
+      const alto_r=(this.nivelCarga/100)*360;
+      const col=this.nivelCarga>80?'#00FF00':this.nivelCarga>50?'#FFFF00':'#CF6679';
+      c.strokeStyle='white'; c.lineWidth=4;
+      c.strokeRect(cx-100,cy-180,200,360);
+      c.fillStyle=col;
+      c.fillRect(cx-95,(cy+175)-alto_r,190,alto_r);
+      this.texto(`${Math.floor(this.nivelCarga)}%`, cx, cy+10,
+        this.nivelCarga>50?'black':'white', 'bold 40px Arial');
+      this.texto('¡CONTRAE FUERTE!', cx, cy+220, 'white', '16px Arial');
+      if (this.nivelCarga>=100) { this.nivelCarga=0; this.registrarRep(); }
+    }
+  }
+
+  dibujarDescanso(now) {
+    const c=this.ctx; c.clearRect(0,0,ANCHO,ALTO);
+    c.fillStyle=COLOR_FONDO; c.fillRect(0,0,ANCHO,ALTO);
+    this.texto('¡EXCELENTE TRABAJO!', ANCHO/2, 130, COLOR_EXITO, 'bold 30px Helvetica');
+    this.texto('Músculo en recuperación. Relaja el brazo.', ANCHO/2, 200, 'white', '16px Arial');
+    const rest = Math.max(0, Math.round((this.finDescanso-now)/1000));
+    c.strokeStyle=COLOR_EXITO; c.lineWidth=5;
+    c.beginPath(); c.arc(ANCHO/2,360,80,0,Math.PI*2); c.stroke();
+    this.texto(String(rest), ANCHO/2, 375, 'white', 'bold 50px Arial');
+    if (rest===0) this.estado=ST.JUGANDO;
+  }
+
+  // ─── HELPERS UI ────────────────────────────────────────
+  texto(t, x, y, col, font) {
+    const c=this.ctx;
+    c.fillStyle=col; c.font=font; c.textAlign='center';
+    t.split('\n').forEach((l,i)=>c.fillText(l, x, y+i*22));
+  }
+
+  botonGen(x, y, txt, col, cb) {
+    const c=this.ctx, w=150, h=25;
+    c.fillStyle=COLOR_UI; c.strokeStyle=col; c.lineWidth=2;
+    c.beginPath(); c.roundRect(x-w, y-h, w*2, h*2, 6); c.fill(); c.stroke();
+    this.texto(txt, x, y+6, col, 'bold 14px Arial');
+    this.registrarClick(x-w, y-h, w*2, h*2, cb);
+  }
+
+  // ─── CLICK HANDLER ─────────────────────────────────────
+  constructor_clicks = [];
+  registrarClick(rx, ry, rw, rh, cb) {
+    this.clickZones.push({rx,ry,rw,rh,cb});
+  }
+
+  // ─── HUD SIGNAL ────────────────────────────────────────
+  actualizarHUD(now) {
+    const rango = this.maxSenal - this.minRuido + 1;
+    const pct = Math.min(100, Math.max(0, (this.valorProcesado-this.minRuido)/rango*100));
+    this.signalFill.style.width = pct+'%';
+    const activo = this.valorProcesado > this.umbral;
+    this.signalFill.style.background = activo ? '#03DAC6' : '#555';
+    this.led.style.background = activo ? '#00FF00' : '#333';
+
+    if (this.estado===ST.JUGANDO || this.estado===ST.DESCANSO) {
+      const secs = Math.floor((now-this.inicioSesion)/1000);
+      const m=Math.floor(secs/60), s=secs%60;
+      this.topBar.textContent = `TIEMPO: ${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    }
+  }
+
+  // ─── LOOP PRINCIPAL ────────────────────────────────────
+  loop() {
+    const now = performance.now();
+    this.clickZones = [];   // resetear zonas clickeables cada frame
+
+    if (this.estado===ST.SPLASH)        this.dibujarSplash();
+    else if (this.estado===ST.MENU)     this.dibujarMenu();
+    else if (this.estado===ST.CALIBRACION) this.dibujarCalibracion();
+    else if (this.estado===ST.INSTRUCCIONES) this.dibujarInstrucciones();
+    else if (this.estado===ST.JUGANDO)  this.dibujarJuego(now);
+    else if (this.estado===ST.GAMEOVER) this.dibujarGameOver();
+    else if (this.estado===ST.DESCANSO) this.dibujarDescanso(now);
+
+    this.actualizarHUD(now);
+    requestAnimationFrame(()=>this.loop());
+  }
+}
+
+// ─── INICIALIZAR ────────────────────────────────────────
+const game = new TheraFlex();
+game.clickZones = [];
+
+document.getElementById('gameCanvas').addEventListener('click', e => {
+  const rect = e.target.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  game.clickZones.forEach(z => {
+    if (mx>=z.rx && mx<=z.rx+z.rw && my>=z.ry && my<=z.ry+z.rh) z.cb();
+  });
+});
+</script>
+</body>
+</html>
