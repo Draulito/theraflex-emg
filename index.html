@@ -18,10 +18,14 @@
   }
   #topBar {
     width: 900px;
+    height: 40px;
     background: #121212;
     color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     text-align: center;
-    padding: 6px 0;
+    padding: 0;
     font-weight: bold;
     font-size: 14px;
     letter-spacing: 2px;
@@ -33,7 +37,7 @@
   }
   #bottomBar {
     width: 900px;
-    height: 90px;
+    height: 100px;
     background: #1F1B24;
     display: flex;
     align-items: center;
@@ -74,30 +78,31 @@
   }
   #serialControls {
     position: absolute;
-    left: 360px;
-    top: 12px;
+    left: 350px;
+    top: 18px;
     display: flex;
     gap: 8px;
     align-items: center;
   }
   #serialControls button {
-    background: #1F1B24;
-    color: white;
-    border: 1px solid #BB86FC;
-    border-radius: 6px;
-    padding: 8px 10px;
-    font-size: 11px;
+    background: #121212;
+    color: #03DAC6;
+    border: 1px solid #03DAC6;
+    border-radius: 4px;
+    padding: 6px 9px;
+    font-size: 10px;
     font-weight: bold;
+    letter-spacing: .8px;
     cursor: pointer;
   }
-  #serialControls button:hover { background: #2A2430; }
+  #serialControls button:hover { background: #18211f; }
   #serialControls button:disabled {
-    opacity: 0.45;
+    opacity: 0.5;
     cursor: not-allowed;
   }
   #statusLabel {
     position: absolute;
-    left: 360px;
+    left: 350px;
     top: 58px;
     color: #ffff00;
     font-size: 12px;
@@ -107,7 +112,7 @@
 <body>
 
 <div id="topBar">TIEMPO: 00:00</div>
-<canvas id="gameCanvas" width="900" height="560"></canvas>
+<canvas id="gameCanvas" width="900" height="580"></canvas>
 <div id="bottomBar">
   <div id="signalSection">
     <div id="signalLabel">INTENSIDAD (DSP):</div>
@@ -118,10 +123,9 @@
     <div id="thresholdLabel">Umbral: --</div>
   </div>
   <div id="serialControls">
-    <button id="connectSerialBtn">🔌 Conectar sensor</button>
-    <button id="demoBtn">▶ Modo demo</button>
+    <button id="connectSerialBtn">🔌 CONECTAR SENSOR</button>
   </div>
-  <div id="statusLabel">Abre la página en Chrome/Edge y conecta el sensor</div>
+  <div id="statusLabel">Esperando sensor...</div>
   <div id="repsDisplay"></div>
 </div>
 
@@ -129,7 +133,7 @@
 // ═══════════════════════════════════════════════════════
 //  CONSTANTES
 // ═══════════════════════════════════════════════════════
-const ANCHO = 900, ALTO = 560;
+const ANCHO = 900, ALTO = 580;
 const COLOR_FONDO   = '#121212';
 const COLOR_UI      = '#1F1B24';
 const COLOR_ACENTO  = '#BB86FC';
@@ -194,7 +198,7 @@ class TheraFlex {
     this.px = 100; this.py = 300; this.pvel = 0;
     this.obstaculos = [];
     this.timerObs = 0; this.cooldownJump = 0;
-    this.gravity = 1.2; this.jumpForce = -22; this.sueloY = ALTO - 160;
+    this.gravity = 1.2; this.jumpForce = -22; this.sueloY = ALTO - 60;
     this.liftForce = -1.2;
     this.nivelCarga = 0;
 
@@ -272,7 +276,8 @@ class TheraFlex {
 
   procesarTextoSerial(texto) {
     this.serialBuffer += texto;
-    const lineas = this.serialBuffer.split(/?
+    const lineas = this.serialBuffer.split(/
+?
 /);
     this.serialBuffer = lineas.pop() || '';
 
@@ -343,16 +348,16 @@ class TheraFlex {
 
     this.texto('THERAFLEX', ANCHO/2, 50, 'white', 'bold 38px Helvetica');
 
-    this.botonMenu(ANCHO/2, 120, '⚙️  CALIBRAR SENSOR', '#FF9800', '', () => this.iniciarCalibracion());
-    this.botonMenu(ANCHO/2, 230, '1. COORDINACIÓN MOTRIZ',
-      '#BB86FC', 'Contracción rápida para saltar obstáculos.', () => this.iniciarInstrucciones(1), true);
-    this.botonMenu(ANCHO/2, 345, '2. APERTURA SOSTENIDA',
-      '#03DAC6', 'Abrir y cerrar mano — mantener contracción media.', () => this.iniciarInstrucciones(2), true);
-    this.botonMenu(ANCHO/2, 460, '3. FUERZA ISOMÉTRICA',
-      '#CF6679', 'Tensión muscular al máximo — llenar barra de energía.', () => this.iniciarInstrucciones(3), true);
+    this.botonMenu(ANCHO/2, 130, '⚙️  CALIBRAR SENSOR', '#FF9800', '', () => this.iniciarCalibracion());
+    this.botonMenu(ANCHO/2, 240, '1. COORDINACIÓN MOTRIZ',
+      '#BB86FC', 'Secuencia de dedos. Objetivo: Control de pulsaciones cortas (saltos).', () => this.iniciarInstrucciones(1), true);
+    this.botonMenu(ANCHO/2, 360, '2. APERTURA SOSTENIDA',
+      '#03DAC6', 'Abrir y cerrar mano. Objetivo: Mantener contracción media (esquivar).', () => this.iniciarInstrucciones(2), true);
+    this.botonMenu(ANCHO/2, 480, '3. FUERZA ISOMÉTRICA',
+      '#CF6679', 'Tensión muscular al máximo. Objetivo: Llenar barra de energía.', () => this.iniciarInstrucciones(3), true);
 
-    this.texto(`Calibración → Reposo: ${this.minRuido.toFixed(1)} | Máx: ${this.maxSenal.toFixed(1)} | Umbral: ${this.umbral.toFixed(1)}`,
-      ANCHO/2, 530, '#555', '9px Arial');
+    this.texto(`Calibración Actual → Reposo: ${this.minRuido.toFixed(1)} | Máx: ${this.maxSenal.toFixed(1)} | Umbral: ${this.umbral.toFixed(1)}`,
+      ANCHO/2, 550, '#555', '9px Arial');
   }
 
   botonMenu(x, y, titulo, color, sub, cb, grande=false) {
